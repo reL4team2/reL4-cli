@@ -44,35 +44,49 @@ struct KernelOptions {
     /// If you want to use binary mode, please set this option.
     #[clap(long, short = 'B')]
     pub bin: bool,
+    /// seL4 prefix path
     #[clap(short = 'P', long, default_value = "/workspace/.seL4")]
-    sel4_prefix: String,
+    pub sel4_prefix: String,
+    /// Local reL4 kernel path
+    #[clap(short = 'L', long)]
+    pub local: Option<String>,
+    /// rel4 kernel branch
+    #[clap(long, default_value = "master")]
+    pub branch: String,
 }
 
 /// Install kernel stuff
 /// If Binary mode is enabled, reL4 kernel build kernel.elf and install it
 /// If Lib mode is enabled, reL4 kernel build librustlib.a for seL4 kernel
 fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
-    let rel4_kernel_dir = "/tmp/rel4_kernel";
-    if std::fs::remove_dir_all(rel4_kernel_dir).is_err() {
-        // Do nothing if the directory does not exist
-    }
+    let rel4_kernel_dir = 
+    if let Some(local_path) = &opts.local {
+        local_path.as_str()
+    } else {
+        let path = "/tmp/rel4_kernel";
+        if std::fs::remove_dir_all(path).is_err() {
+            // Do nothing if the directory does not exist
+        }
 
-    let mut exec = Command::new("git");
-    let command = exec
-        .args(&["clone", "https://github.com/reL4team2/rel4-integral.git", rel4_kernel_dir, 
-                "--config", "advice.detachedHead=false", "--depth", "1", "--branch", "master"]);
-    let mut attempts = 0;
-    while !command.status()?.success() && attempts < 3 {
-        attempts += 1;
-        eprintln!("rel4-integral git clone failed. Retrying... (attempt {}/{})", attempts, 3);
-    }
+        let mut exec = Command::new("git");
+        let command = exec
+            .args(&["clone", "https://github.com/reL4team2/rel4-integral.git", path, 
+                    "--config", "advice.detachedHead=false", "--depth", "1", "--branch", &opts.branch]);
+        let mut attempts = 0;
+        while !command.status()?.success() && attempts < 3 {
+            attempts += 1;
+            eprintln!("rel4-integral git clone failed. Retrying... (attempt {}/{})", attempts, 3);
+        }
 
-    // fix home version bug
-    let status = Command::new("cargo").args(&["update", "home@0.5.11", "--precise", "0.5.5"]).current_dir(rel4_kernel_dir).status()?;
-    if !status.success() {
-        return Err(anyhow::anyhow!("Failed to update home version"));
-    }
+        // fix home version bug
+        let status = Command::new("cargo").args(&["update", "home@0.5.11", "--precise", "0.5.5"]).current_dir(path).status()?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to update home version"));
+        }
     
+        path
+    };
+
     let mut command = Command::new("rustup");
     let mut args = vec![
         "run",
@@ -130,34 +144,61 @@ fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
         std::fs::copy(&kernel_path, &install_path)?;
     }
 
-    let build_sel4_dir = "/tmp/seL4_kernel";
-    if std::fs::remove_dir_all(build_sel4_dir).is_err() {
-        // Do nothing if the directory does not exist
-    }
+    let build_sel4_dir = 
+    if let Some(local_path) = &opts.local {
+        std::path::PathBuf::from(local_path).join("../kernel")
+    } else {
+        let path = "/tmp/seL4_kernel";
+        if std::fs::remove_dir_all(path).is_err() {
+            // Do nothing if the directory does not exist
+        }
 
-    let mut exec = Command::new("git");
-    let command = exec.args(&["clone", "https://github.com/reL4team2/seL4_c_impl.git", build_sel4_dir, "--config", "advice.detachedHead=false"]);
-    let mut attempts = 0;
-    while !command.status()?.success() && attempts < 3 {
-        attempts += 1;
-        eprintln!("seL4_c_impl git clone failed. Retrying... (attempt {}/{})", attempts, 3);
-    }
-    
-    let sel4_build_path = std::path::PathBuf::from(build_sel4_dir).join("build");
+        let mut exec = Command::new("git");
+        let command = exec.args(&["clone", "https://github.com/reL4team2/seL4_c_impl.git", path, "--config", "advice.detachedHead=false"]);
+        let mut attempts = 0;
+        while !command.status()?.success() && attempts < 3 {
+            attempts += 1;
+            eprintln!("seL4_c_impl git clone failed. Retrying... (attempt {}/{})", attempts, 3);
+        }
+        std::path::PathBuf::from(path)
+    };
+
+    let build_sel4_dir = std::fs::canonicalize(build_sel4_dir)?;    
+    let sel4_build_path = build_sel4_dir.join("build");
+
+    let rel4_kernel_flag = format!("-DREL4_KERNEL={}", if opts.bin { "TRUE" } else { "FALSE" });
+    let install_prefix_flag = format!("-DCMAKE_INSTALL_PREFIX={}", prefix);
+    let args: Vec<&str> = match opts.platform.as_str() {
+        "spike" => {
+            vec![
+                "-DCROSS_COMPILER_PREFIX=riscv64-unknown-linux-gnu-",
+                &install_prefix_flag, &rel4_kernel_flag,
+                "-C", "./kernel-settings-riscv64.cmake",
+                "-G", "Ninja",
+                "-S", ".",
+                "-B", sel4_build_path.to_str().unwrap(),
+            ]
+        },
+        "qemu-arm-virt" => {
+            vec![
+                "-DCROSS_COMPILER_PREFIX=aarch64-linux-gnu-",
+                "-DKernelAllowSMCCalls=ON",
+                &install_prefix_flag, &rel4_kernel_flag,
+                "-DKernelArmExportPCNTUser=ON",
+                "-DKernelArmExportPTMRUser=ON",
+                "-C", "./kernel-settings-aarch64.cmake",
+                "-G", "Ninja",
+                "-S", ".",
+                "-B", sel4_build_path.to_str().unwrap(),
+            ]
+        },
+        _ => return Err(anyhow::anyhow!("Unsupported platform")),
+        
+    };
+
     let status = Command::new("cmake")
-        .args(&[
-            "-DCROSS_COMPILER_PREFIX=aarch64-linux-gnu-",
-            format!("-DCMAKE_INSTALL_PREFIX={}", prefix).as_str(),
-            "-DKernelAllowSMCCalls=ON",
-            format!("-DREL4_KERNEL={}", if opts.bin { "TRUE" } else { "FALSE" }).as_str(),
-            "-DKernelArmExportPCNTUser=ON",
-            "-DKernelArmExportPTMRUser=ON",
-            "-C", "./kernel-settings-aarch64.cmake",
-            "-G", "Ninja",
-            "-S", ".",
-            "-B", sel4_build_path.to_str().unwrap(),
-        ])
-        .current_dir(build_sel4_dir)
+        .args(args)
+        .current_dir(build_sel4_dir.clone())
         .status()?;
     if !status.success() {
         return Err(anyhow::anyhow!("Failed to configure project with CMake"));
@@ -165,7 +206,7 @@ fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
 
     let status = Command::new("ninja")
         .args(&["-C", "build", "all"])
-        .current_dir(build_sel4_dir)
+        .current_dir(build_sel4_dir.clone())
         .status()?;
     if !status.success() {
         return Err(anyhow::anyhow!("Failed to build project with Ninja"));
