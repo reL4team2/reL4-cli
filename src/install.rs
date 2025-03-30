@@ -67,7 +67,7 @@ fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
         local_path.as_str()
     } else {
         let path = "/tmp/rel4_kernel";
-        if opts.force {
+        if opts.force || !std::path::Path::new(path).exists() {
             if std::fs::remove_dir_all(path).is_err() {
                 // Do nothing if the directory does not exist
             }
@@ -154,7 +154,7 @@ fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
         std::path::PathBuf::from(local_path).join("../kernel")
     } else {
         let path = "/tmp/seL4_kernel";
-        if opts.force {
+        if opts.force || !std::path::Path::new(path).exists() {
             if std::fs::remove_dir_all(path).is_err() {
                 // Do nothing if the directory does not exist
             }
