@@ -53,6 +53,9 @@ struct KernelOptions {
     /// rel4 kernel branch
     #[clap(long, default_value = "master")]
     pub branch: String,
+    /// force install
+    #[clap(long)]
+    pub force: bool,
 }
 
 /// Install kernel stuff
@@ -64,24 +67,26 @@ fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
         local_path.as_str()
     } else {
         let path = "/tmp/rel4_kernel";
-        if std::fs::remove_dir_all(path).is_err() {
-            // Do nothing if the directory does not exist
-        }
+        if opts.force {
+            if std::fs::remove_dir_all(path).is_err() {
+                // Do nothing if the directory does not exist
+            }
 
-        let mut exec = Command::new("git");
-        let command = exec
-            .args(&["clone", "https://github.com/reL4team2/rel4-integral.git", path, 
-                    "--config", "advice.detachedHead=false", "--depth", "1", "--branch", &opts.branch]);
-        let mut attempts = 0;
-        while !command.status()?.success() && attempts < 3 {
-            attempts += 1;
-            eprintln!("rel4-integral git clone failed. Retrying... (attempt {}/{})", attempts, 3);
-        }
+            let mut exec = Command::new("git");
+            let command = exec
+                .args(&["clone", "https://github.com/reL4team2/rel4-integral.git", path, 
+                        "--config", "advice.detachedHead=false", "--depth", "1", "--branch", &opts.branch]);
+            let mut attempts = 0;
+            while !command.status()?.success() && attempts < 3 {
+                attempts += 1;
+                eprintln!("rel4-integral git clone failed. Retrying... (attempt {}/{})", attempts, 3);
+            }
 
-        // fix home version bug
-        let status = Command::new("cargo").args(&["update", "home@0.5.11", "--precise", "0.5.5"]).current_dir(path).status()?;
-        if !status.success() {
-            return Err(anyhow::anyhow!("Failed to update home version"));
+            // fix home version bug
+            let status = Command::new("cargo").args(&["update", "home@0.5.11", "--precise", "0.5.5"]).current_dir(path).status()?;
+            if !status.success() {
+                return Err(anyhow::anyhow!("Failed to update home version"));
+            }
         }
     
         path
@@ -149,16 +154,18 @@ fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
         std::path::PathBuf::from(local_path).join("../kernel")
     } else {
         let path = "/tmp/seL4_kernel";
-        if std::fs::remove_dir_all(path).is_err() {
-            // Do nothing if the directory does not exist
-        }
+        if opts.force {
+            if std::fs::remove_dir_all(path).is_err() {
+                // Do nothing if the directory does not exist
+            }
 
-        let mut exec = Command::new("git");
-        let command = exec.args(&["clone", "https://github.com/reL4team2/seL4_c_impl.git", path, "--config", "advice.detachedHead=false"]);
-        let mut attempts = 0;
-        while !command.status()?.success() && attempts < 3 {
-            attempts += 1;
-            eprintln!("seL4_c_impl git clone failed. Retrying... (attempt {}/{})", attempts, 3);
+            let mut exec = Command::new("git");
+            let command = exec.args(&["clone", "https://github.com/reL4team2/seL4_c_impl.git", path, "--config", "advice.detachedHead=false"]);
+            let mut attempts = 0;
+            while !command.status()?.success() && attempts < 3 {
+                attempts += 1;
+                eprintln!("seL4_c_impl git clone failed. Retrying... (attempt {}/{})", attempts, 3);
+            }
         }
         std::path::PathBuf::from(path)
     };
@@ -228,17 +235,20 @@ fn install_kernel_loader(opts: &KernelOptions, prefix: &str) -> anyhow::Result<(
     let url: String = "https://github.com/reL4team2/rust-sel4.git".into();
     let rev: String = "642b58d807c5e5fc22f0c15d1467d6bec328faa9".into();
 
-    let args: Vec<&str> = vec![
+    let mut args: Vec<&str> = vec![
         "run",
         "nightly-2024-08-01",
         "cargo",
         "install",
-        "--force",
         "--git", url.as_str(),
         "--rev", rev.as_str(),
         "--root".into(), prefix,
         "sel4-kernel-loader-add-payload".into(),
     ];
+
+    if opts.force {
+        args.push("--force");
+    }
 
     cmd.env_remove("RUSTUP_TOOLCHAIN").env_remove("CARGO").args(&args).status().expect("failed install sel4-kernel-loader-add-payload");
     
@@ -248,12 +258,11 @@ fn install_kernel_loader(opts: &KernelOptions, prefix: &str) -> anyhow::Result<(
         _ => return Err(anyhow::anyhow!("Unsupported platform")),
     };
     let mut cmd = Command::new("rustup");
-    let args: Vec<&str>  = vec![
+    let mut args: Vec<&str>  = vec![
         "run",
         "nightly-2024-08-01",
         "cargo",
         "install",
-        "--force",
         "-Z", "build-std=core,compiler_builtins",
         "-Z", "build-std-features=compiler-builtins-mem",
         "--target", target.as_str(),
@@ -262,6 +271,10 @@ fn install_kernel_loader(opts: &KernelOptions, prefix: &str) -> anyhow::Result<(
         "--root".into(), prefix,
         "sel4-kernel-loader".into(),
     ];
+
+    if opts.force {
+        args.push("--force");
+    }
 
     cmd.env_remove("RUSTUP_TOOLCHAIN")
         .env_remove("CARGO")
