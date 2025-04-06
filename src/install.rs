@@ -56,12 +56,121 @@ struct KernelOptions {
     /// force install
     #[clap(long)]
     pub force: bool,
+    /// seL4 baseline version
+    #[clap(long)]
+    pub sel4_baseline: Option<String>,
 }
 
-/// Install kernel stuff
+/// Install kernel, seL4 or reL4
+fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
+    if let Some(commit) = &opts.sel4_baseline {
+        install_sel4_kernel(opts, prefix, &commit)
+    } else {
+        install_rel4_kernel(opts, prefix)
+    }
+}
+
+/// Install seL4 kernel
+fn install_sel4_kernel(opts: &KernelOptions, prefix: &str, commit: &str) -> anyhow::Result<()> {
+    let path = "/tmp/seL4_kernel";
+    if std::fs::remove_dir_all(path).is_err() {
+        // Do nothing if the directory does not exist
+    }
+
+    let mut exec = Command::new("git");
+    let command = exec.args(&[
+        "clone",
+        "https://github.com/seL4/seL4.git",
+        path,
+    ]);
+
+    let mut attempts = 0;
+    while !command.status()?.success() && attempts < 3 {
+        attempts += 1;
+        eprintln!("seL4 git clone failed. Retrying... (attempt {}/{})", attempts, 3);
+    }
+
+    let checkout_command = Command::new("git")
+        .args(&["checkout", commit])
+        .current_dir(path)
+        .status()?;
+    if !checkout_command.success() {
+        return Err(anyhow::anyhow!("Failed to checkout specific commit"));
+    }
+
+    let build_sel4_dir = std::path::PathBuf::from(path);
+
+    let build_sel4_dir = std::fs::canonicalize(build_sel4_dir)?;
+    let sel4_build_path = build_sel4_dir.join("build");
+
+    let install_prefix_flag = format!("-DCMAKE_INSTALL_PREFIX={}", prefix);
+    let args: Vec<&str> = match opts.platform.as_str() {
+        "spike" => {
+            vec![
+                "-DCROSS_COMPILER_PREFIX=riscv64-unknown-linux-gnu-",
+                &install_prefix_flag,
+                "-DKernelArch=riscv",
+                "-DKernelPlatform=spike",
+                "-DKernelSel4Arch=riscv64",
+                "-DKernelVerificationBuild=OFF",
+                "-G", "Ninja",
+                "-S", ".",
+                "-B", sel4_build_path.to_str().unwrap(),
+            ]
+        },
+        "qemu-arm-virt" => {
+            vec![
+                "-DCROSS_COMPILER_PREFIX=aarch64-linux-gnu-",
+                "-DKernelAllowSMCCalls=ON",
+                &install_prefix_flag,
+                "-DKernelArmExportPCNTUser=ON",
+                "-DKernelArmExportPTMRUser=ON",
+                "-DARM_CPU=cortex-a57",
+                "-DKernelArch=arm",
+                "-DKernelArmHypervisorSupport=OFF",
+                "-DKernelPlatform=qemu-arm-virt",
+                "-DKernelSel4Arch=aarch64",
+                "-DKernelVerificationBuild=OFF",
+                "-G", "Ninja",
+                "-S", ".",
+                "-B", sel4_build_path.to_str().unwrap(),
+            ]
+        },
+        _ => return Err(anyhow::anyhow!("Unsupported platform")),
+        
+    };
+
+    let status = Command::new("cmake")
+        .args(args)
+        .current_dir(build_sel4_dir.clone())
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to configure project with CMake"));
+    }
+
+    let status = Command::new("ninja")
+        .args(&["-C", "build", "all"])
+        .current_dir(build_sel4_dir.clone())
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to build project with Ninja"));
+    }
+
+    let status = Command::new("ninja")
+        .args(&["-C", "build", "install"])
+        .current_dir(build_sel4_dir)
+        .status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("Failed to install project with Ninja"));
+    }
+
+    Ok(())
+}
+
+/// Install rel4 kernel stuff
 /// If Binary mode is enabled, reL4 kernel build kernel.elf and install it
 /// If Lib mode is enabled, reL4 kernel build librustlib.a for seL4 kernel
-fn install_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
+fn install_rel4_kernel(opts: &KernelOptions, prefix: &str) -> anyhow::Result<()> {
     let rel4_kernel_dir = 
     if let Some(local_path) = &opts.local {
         local_path.as_str()
